@@ -165,6 +165,8 @@
   .option.incorrect .bullet { border-color: var(--bad); background: var(--bad); color: #2a0509; }
   .option.dim { opacity: 0.55; }
   .option.locked { cursor: default; }
+  .option.selected-neutral { border-color: var(--accent); background: rgba(91,140,255,0.10); }
+  .option.selected-neutral .bullet { border-color: var(--accent); background: var(--accent); color: #fff; }
 
   .feedback-box {
     margin-top: 16px; padding: 16px; border-radius: 10px;
@@ -184,7 +186,10 @@
   .ref-box b { color: var(--text); }
 
   .nav-row { display: flex; gap: 10px; margin-top: 18px; }
-  .nav-row button.primary { margin-top: 0; }
+  .nav-row button { flex: 1; width: auto; margin-top: 0; }
+  .nav-row button.secondary:disabled { opacity: 0.35; cursor: not-allowed; }
+  .finish-early-row { text-align: center; margin-top: 10px; }
+  .mode-note { color: var(--text-dim); font-size: 0.82rem; margin: 6px 0 0; line-height: 1.5; }
 
   /* Results screen */
   .big-score { text-align: center; margin: 8px 0 20px; }
@@ -254,13 +259,24 @@ function CheckIcon() {
   return <svg viewBox="0 0 24 24" fill="none"><path d="M5 13l4 4L19 7" stroke="#fff" strokeWidth="3" strokeLinecap="round" strokeLinejoin="round"/></svg>;
 }
 
+function ModeSelect({ value, onChange }) {
+  return (
+    <select value={value} onChange={e => onChange(e.target.value)}>
+      <option value="test">מצב מבחן — בלי משוב עד הסוף</option>
+      <option value="practice">תרגול עם משוב מיידי</option>
+    </select>
+  );
+}
+
 function SetupScreen({ onStart }) {
   const [examPerTopic, setExamPerTopic] = useState("20");
+  const [examMode, setExamMode] = useState("test");
   const [showCustom, setShowCustom] = useState(false);
 
   const [checked, setChecked] = useState({ abdomen: true, pelvis: true, lowerlimb: true });
   const [count, setCount] = useState("all");
   const [order, setOrder] = useState("shuffle");
+  const [customMode, setCustomMode] = useState("practice");
 
   const totalAvailable = TOPICS.reduce((sum, t) => checked[t.key] ? sum + t.data.length : sum, 0);
   const grandTotal = TOPICS.reduce((sum, t) => sum + t.data.length, 0);
@@ -275,7 +291,7 @@ function SetupScreen({ onStart }) {
   }
 
   function startExam() {
-    onStart(buildExamSimulation(perTopicNum));
+    onStart(buildExamSimulation(perTopicNum), examMode);
   }
 
   function startCustom() {
@@ -293,7 +309,7 @@ function SetupScreen({ onStart }) {
       const n = parseInt(count, 10);
       pool = pool.slice(0, n);
     }
-    onStart(pool);
+    onStart(pool, customMode);
   }
 
   return (
@@ -313,7 +329,15 @@ function SetupScreen({ onStart }) {
             <option value="20">20 (60 בסה"כ — כמו במבחן האמיתי)</option>
             <option value="25">25 (75 בסה"כ)</option>
           </select>
+
+          <label style={{color: "var(--text-dim)", fontSize: "0.9rem", marginRight: "6px"}}>מצב:</label>
+          <ModeSelect value={examMode} onChange={setExamMode} />
         </div>
+        <p className="mode-note">
+          {examMode === "test"
+            ? "במצב מבחן לא תראו אם ענית נכון עד שתסיימו — בדיוק כמו במבחן אמיתי. אפשר לנווט קדימה ואחורה בין השאלות בכל שלב."
+            : "במצב תרגול תראו מיד אחרי כל שאלה אם ענית נכון, עם הסבר והפניה לסיכום."}
+        </p>
 
         <button className="primary" onClick={startExam}>
           התחל מבחן לדוגמה ({examTotal} שאלות)
@@ -357,6 +381,9 @@ function SetupScreen({ onStart }) {
               <option value="byTopic">מקובץ לפי נושא (בלי ערבוב בין נושאים)</option>
               <option value="ordered">לפי סדר הסיכום</option>
             </select>
+
+            <label style={{color: "var(--text-dim)", fontSize: "0.9rem", marginRight: "6px"}}>מצב:</label>
+            <ModeSelect value={customMode} onChange={setCustomMode} />
           </div>
 
           <button className="primary" disabled={totalAvailable === 0} onClick={startCustom}>
@@ -368,77 +395,121 @@ function SetupScreen({ onStart }) {
   );
 }
 
-function Option({ opt, idx, selected, correctIndex, locked, onPick }) {
+function Option({ opt, idx, isSelected, isCorrect, revealMode, clickable, onPick }) {
   let cls = "option";
-  if (locked) {
+  if (revealMode) {
     cls += " locked";
-    if (idx === correctIndex) cls += " correct";
-    else if (idx === selected) cls += " incorrect";
+    if (isCorrect) cls += " correct";
+    else if (isSelected) cls += " incorrect";
     else cls += " dim";
+  } else {
+    if (!clickable) cls += " locked";
+    if (isSelected) cls += " selected-neutral";
   }
   const letters = ["א", "ב", "ג", "ד"];
   return (
-    <div className={cls} onClick={() => !locked && onPick(idx)}>
+    <div className={cls} onClick={() => clickable && onPick(idx)}>
       <div className="bullet">
-        {locked && idx === correctIndex ? <CheckIcon/> : locked && idx === selected ? "✕" : letters[idx]}
+        {revealMode && isCorrect ? <CheckIcon/> : revealMode && isSelected ? "✕" : letters[idx]}
       </div>
       <div>{opt}</div>
     </div>
   );
 }
 
-function QuizScreen({ questions, onFinish }) {
+function QuizScreen({ questions, mode, onFinish }) {
   const [i, setI] = useState(0);
-  const [selected, setSelected] = useState(null);
-  const [showRef, setShowRef] = useState(false);
-  const [results, setResults] = useState([]); // {q, selected, correct}
+  const [answers, setAnswers] = useState(() => Array(questions.length).fill(null));
+  const [refShown, setRefShown] = useState(() => Array(questions.length).fill(false));
 
   const q = questions[i];
-  const locked = selected !== null;
+  const selected = answers[i];
+  const answered = selected !== null && selected !== undefined;
+  const revealMode = mode === "practice" && answered;
+  const clickable = !(mode === "practice" && answered);
 
   function pick(idx) {
-    if (locked) return;
-    setSelected(idx);
+    if (!clickable) return;
+    setAnswers(prev => {
+      const next = prev.slice();
+      next[i] = idx;
+      return next;
+    });
   }
 
-  function next() {
-    const wasCorrect = selected === q.correctIndex;
-    const newResults = results.concat([{ q, selected, correct: wasCorrect }]);
-    if (i + 1 >= questions.length) {
-      onFinish(newResults);
-    } else {
-      setResults(newResults);
+  function buildResults() {
+    return questions.map((qq, idx) => ({
+      q: qq,
+      selected: answers[idx] === undefined ? null : answers[idx],
+      correct: answers[idx] === qq.correctIndex,
+    }));
+  }
+
+  function goPrev() {
+    if (i > 0) setI(i - 1);
+  }
+
+  function goNext() {
+    if (i + 1 < questions.length) {
       setI(i + 1);
-      setSelected(null);
-      setShowRef(false);
+    } else {
+      onFinish(buildResults());
     }
   }
 
-  const correctSoFar = results.filter(r => r.correct).length;
+  function finishNow() {
+    onFinish(buildResults());
+  }
+
+  function showRefForCurrent() {
+    setRefShown(prev => {
+      const next = prev.slice();
+      next[i] = true;
+      return next;
+    });
+  }
+
+  const answeredCount = answers.filter(a => a !== null && a !== undefined).length;
+  const correctSoFar = mode === "practice"
+    ? answers.filter((a, idx) => a === questions[idx].correctIndex).length
+    : 0;
 
   return (
     <div className="card">
       <div className="progress-wrap">
         <span className="progress-text">{i + 1} / {questions.length}</span>
         <div className="progress-bar"><div className="progress-fill" style={{width: ((i)/questions.length*100) + "%"}}/></div>
-        <span className="score-chip">✓ {correctSoFar}</span>
+        {mode === "practice" ? (
+          <span className="score-chip">✓ {correctSoFar}</span>
+        ) : (
+          <span className="score-chip">נענו {answeredCount}/{questions.length}</span>
+        )}
       </div>
 
       <div className="topic-tag">{q.topic}</div>
       <p className="question-text">{q.question}</p>
 
       {q.options.map((opt, idx) => (
-        <Option key={idx} opt={opt} idx={idx} selected={selected} correctIndex={q.correctIndex} locked={locked} onPick={pick} />
+        <Option
+          key={idx}
+          opt={opt}
+          idx={idx}
+          isSelected={idx === selected}
+          isCorrect={idx === q.correctIndex}
+          revealMode={revealMode}
+          clickable={clickable}
+          onPick={pick}
+        />
       ))}
 
-      {locked && (
+      {revealMode && (
         <div className={"feedback-box " + (selected === q.correctIndex ? "good" : "bad")}>
           <div className={"feedback-title " + (selected === q.correctIndex ? "good" : "bad")}>
             {selected === q.correctIndex ? "✓ תשובה נכונה" : "✕ תשובה שגויה"}
           </div>
           <p className="explanation-text">{q.explanation}</p>
-          {!showRef ? (
-            <button className="linklike" onClick={() => setShowRef(true)}>הצג הפניה למקור בסיכום ›</button>
+          {!refShown[i] ? (
+            <button className="linklike" onClick={showRefForCurrent}>הצג הפניה למקור בסיכום ›</button>
           ) : (
             <div className="ref-box">
               📄 <b>{q.reference.doc}</b> — עמוד <b>{q.reference.page}</b> — נושא: <b>{q.reference.section}</b>
@@ -449,10 +520,16 @@ function QuizScreen({ questions, onFinish }) {
       )}
 
       <div className="nav-row">
-        <button className="primary" disabled={!locked} onClick={next}>
-          {i + 1 >= questions.length ? "סיים וראה תוצאות" : "לשאלה הבאה ←"}
+        <button className="secondary" disabled={i === 0} onClick={goPrev}>→ הקודמת</button>
+        <button className="primary" onClick={goNext}>
+          {i + 1 >= questions.length ? "סיים וראה תוצאות" : "הבאה ←"}
         </button>
       </div>
+      {i + 1 < questions.length && (
+        <div className="finish-early-row">
+          <button className="linklike" onClick={finishNow}>סיים עכשיו וראה תוצאות ›</button>
+        </div>
+      )}
     </div>
   );
 }
@@ -498,10 +575,12 @@ function ResultsScreen({ results, onRestartAll, onRetryMissed }) {
 function App() {
   const [screen, setScreen] = useState("setup"); // setup | quiz | results
   const [activeQuestions, setActiveQuestions] = useState([]);
+  const [activeMode, setActiveMode] = useState("practice");
   const [finalResults, setFinalResults] = useState([]);
 
-  function startQuiz(pool) {
+  function startQuiz(pool, mode) {
     setActiveQuestions(pool);
+    setActiveMode(mode || "practice");
     setScreen("quiz");
   }
   function finishQuiz(results) {
@@ -513,6 +592,7 @@ function App() {
   }
   function retryMissed(qs) {
     setActiveQuestions(shuffle(qs));
+    setActiveMode("practice");
     setScreen("quiz");
   }
 
@@ -526,7 +606,7 @@ function App() {
       </header>
 
       {screen === "setup" && <SetupScreen onStart={startQuiz} />}
-      {screen === "quiz" && <QuizScreen questions={activeQuestions} onFinish={finishQuiz} />}
+      {screen === "quiz" && <QuizScreen questions={activeQuestions} mode={activeMode} onFinish={finishQuiz} />}
       {screen === "results" && <ResultsScreen results={finalResults} onRestartAll={restartAll} onRetryMissed={retryMissed} />}
 
       <footer className="note">
